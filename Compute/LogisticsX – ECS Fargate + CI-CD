@@ -1,0 +1,334 @@
+Context:
+
+LogisticsX deploys containerized microservices on ECS Fargate and wants a fully Terraform-driven setup with CI/CD.
+
+Task:
+
+In /home/ubuntu/1841240-terraform-ecs-fargate-cicd/main.tf, use Terraform to:
+1. Create an ECR repository named logisticsx-service.
+2. Provision an ECS cluster with Fargate capacity provider.
+3. Define a Fargate task definition (1 vCPU, 2 GB) and a service using the image from the new repo.
+4. Build an AWS CodePipeline that: • Uses a GitHub webhook for source • Has a CodeBuild project to run docker build & docker push into ECR • Deploys to the ECS Fargate service
+After all resources are up, automatically trigger an initial deployment by adding a local-exec provisioner to:
+* Authenticate to ECR (aws ecr get-login-password …)
+* Build and push a sample Docker image into the logisticsx-service repo
+* Optionally invoke the pipeline (e.g., via aws codepipeline start-pipeline-execution)
+Validation:
+Run solve to verify the repository, cluster, service, pipeline, and initial push execute successfully.
+
+
+ANSWER:	
+
+terraform {
+  required_version = ">= 1.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "eu-central-1"
+}
+
+#----------------------------------------------------------------
+# 1. ECR repository
+#----------------------------------------------------------------
+resource "aws_ecr_repository" "service" {
+  name                 = "logisticsx-service"
+  image_tag_mutability = "MUTABLE"
+}
+
+#----------------------------------------------------------------
+# 2. ECS Cluster with Fargate
+#----------------------------------------------------------------
+resource "aws_ecs_cluster" "cluster" {
+  name               = "logisticsx-cluster"
+  capacity_providers = ["FARGATE"]
+}
+
+#----------------------------------------------------------------
+# 3. ECS Task Definition & Service
+#----------------------------------------------------------------
+resource "aws_ecs_task_definition" "service" {
+  family                   = "logisticsx-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "1024"
+  memory                   = "2048"
+  execution_role_arn       = aws_iam_role.ecs_task_exec.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "app"
+      image     = "${aws_ecr_repository.service.repository_url}:latest"
+      essential = true
+      portMappings = [
+        { containerPort = 80, protocol = "tcp" }
+      ]
+    }
+  ])
+}
+
+resource "aws_ecs_service" "service" {
+  name            = "logisticsx-service"
+  cluster         = aws_ecs_cluster.cluster.id
+  task_definition = aws_ecs_task_definition.service.arn
+  launch_type     = "FARGATE"
+  desired_count   = 1
+
+  network_configuration {
+    subnets         = var.subnet_ids
+    security_groups = var.security_group_ids
+    assign_public_ip = true
+  }
+
+  depends_on = [aws_ecs_cluster.cluster]
+}
+
+# IAM role for ECS task execution
+resource "aws_iam_role" "ecs_task_exec" {
+  name = "logisticsx-ecs-task-exec-role"
+
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_assume.json
+}
+
+data "aws_iam_policy_document" "ecs_task_assume" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_policy" {
+  role       = aws_iam_role.ecs_task_exec.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+#----------------------------------------------------------------
+# 4. CodePipeline & CodeBuild for CI/CD
+#----------------------------------------------------------------
+resource "aws_s3_bucket" "artifacts" {
+  bucket = "logisticsx-pipeline-artifacts"
+  acl    = "private"
+}
+
+resource "aws_iam_role" "codepipeline" {
+  name = "logisticsx-codepipeline-role"
+
+  assume_role_policy = data.aws_iam_policy_document.cp_assume.json
+}
+
+data "aws_iam_policy_document" "cp_assume" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["codepipeline.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "cp_attach" {
+  role       = aws_iam_role.codepipeline.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSCodePipelineFullAccess"
+}
+
+resource "aws_iam_role" "codebuild" {
+  name = "logisticsx-codebuild-role"
+
+  assume_role_policy = data.aws_iam_policy_document.cb_assume.json
+}
+
+data "aws_iam_policy_document" "cb_assume" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["codebuild.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "cb_ecr" {
+  role       = aws_iam_role.codebuild.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+}
+
+resource "aws_iam_role_policy_attachment" "cb_s3" {
+  role       = aws_iam_role.codebuild.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+}
+
+resource "aws_codebuild_project" "build" {
+  name          = "logisticsx-build"
+  service_role  = aws_iam_role.codebuild.arn
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    image                       = "aws/codebuild/standard:6.0"
+    type                        = "LINUX_CONTAINER"
+    privileged_mode             = true
+  }
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = <<EOF
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to ECR
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${aws_ecr_repository.service.repository_url}
+  build:
+    commands:
+      - echo Build Docker image
+      - docker build -t ${aws_ecr_repository.service.repository_url}:latest .
+      - docker push ${aws_ecr_repository.service.repository_url}:latest
+  post_build:
+    commands:
+      - printf '[{"name":"app","imageUri":"%s"}]' ${aws_ecr_repository.service.repository_url}:latest > imagedefinitions.json
+EOF
+  }
+}
+
+resource "aws_codepipeline" "pipeline" {
+  name     = "logisticsx-pipeline"
+  role_arn = aws_iam_role.codepipeline.arn
+
+  artifact_store {
+    location = aws_s3_bucket.artifacts.bucket
+    type     = "S3"
+  }
+
+  stage {
+    name = "Source"
+    action {
+      name             = "GitHub_Source"
+      category         = "Source"
+      owner            = "ThirdParty"
+      provider         = "GitHub"
+      version          = "1"
+      output_artifacts = ["SourceArtifact"]
+      configuration = {
+        Owner      = var.github_owner
+        Repo       = var.github_repo
+        Branch     = var.github_branch
+        OAuthToken = var.github_oauth_token
+        PollForSourceChanges = "false"
+      }
+    }
+  }
+
+  stage {
+    name = "Build"
+    action {
+      name             = "Docker_Build"
+      category         = "Build"
+      owner            = "AWS"
+      provider         = "CodeBuild"
+      input_artifacts  = ["SourceArtifact"]
+      output_artifacts = ["BuildArtifact"]
+      version          = "1"
+      configuration = {
+        ProjectName = aws_codebuild_project.build.name
+      }
+    }
+  }
+
+  stage {
+    name = "Deploy"
+    action {
+      name            = "Deploy_Service"
+      category        = "Deploy"
+      owner           = "AWS"
+      provider        = "ECS"
+      input_artifacts = ["BuildArtifact"]
+      version         = "1"
+      configuration = {
+        ClusterName    = aws_ecs_cluster.cluster.name
+        ServiceName    = aws_ecs_service.service.name
+        FileName       = "imagedefinitions.json"
+      }
+    }
+  }
+}
+
+#----------------------------------------------------------------
+# 5. Initial Push via local-exec
+#----------------------------------------------------------------
+resource "null_resource" "initial_deploy" {
+  depends_on = [aws_codepipeline.pipeline]
+
+  provisioner "local-exec" {
+    command = <<EOC
+      aws ecr get-login-password --region eu-central-1 | \
+        docker login --username AWS --password-stdin ${aws_ecr_repository.service.repository_url}
+      docker build -t sample-app ./sample
+      docker tag sample-app:latest ${aws_ecr_repository.service.repository_url}:latest
+      docker push ${aws_ecr_repository.service.repository_url}:latest
+      aws codepipeline start-pipeline-execution --name ${aws_codepipeline.pipeline.name}
+    EOC
+  }
+}
+
+#----------------------------------------------------------------
+# 6. VARIABLES
+#----------------------------------------------------------------
+variable "subnet_ids" {
+  type        = list(string)
+  description = "List of VPC subnet IDs for ECS tasks"
+}
+
+variable "security_group_ids" {
+  type        = list(string)
+  description = "Security group IDs for ECS tasks"
+}
+
+variable "github_owner" {
+  type        = string
+  description = "GitHub owner or organization"
+}
+
+variable "github_repo" {
+  type        = string
+  description = "GitHub repository name"
+}
+
+variable "github_branch" {
+  type        = string
+  description = "Git branch to build"
+  default     = "main"
+}
+
+variable "github_oauth_token" {
+  type        = string
+  description = "OAuth token for GitHub (in Secrets Manager or variable)"
+  sensitive   = true
+}
+
+#----------------------------------------------------------------
+# 7. OUTPUT
+#----------------------------------------------------------------
+output "ecr_repository_url" {
+  value = aws_ecr_repository.service.repository_url
+}
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.cluster.name
+}
+
+output "codepipeline_name" {
+  value = aws_codepipeline.pipeline.name
+}
