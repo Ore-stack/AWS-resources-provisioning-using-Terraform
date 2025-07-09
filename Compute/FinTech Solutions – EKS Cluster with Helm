@@ -1,0 +1,323 @@
+Context:
+
+FinTech Solutions needs a secure, production-grade Kubernetes platform for its microservices. They want an Amazon EKS cluster in a private network with managed node groups, IAM workload identity (IRSA), and the AWS Load Balancer Controller installed via Helm.
+
+Task:
+
+Complete the Terraform file at /home/ubuntu/1841220-terraform-eks-cluster/main.tf to:
+1. Provision an EKS cluster named fintech-prod in eu-central-1.
+2. Create two managed node groups (min=2, max=5) across two private subnets.
+3. Enable the IAM OIDC provider for IRSA.
+4. Use the Terraform Helm provider to install the AWS Load Balancer Controller into the cluster.
+After the cluster and node groups are active, automatically configure your local kubectl context and verify node registration by using a local-exec provisioner to run:
+* aws eks update-kubeconfig --name fintech-prod --region eu-central-1
+* kubectl get nodes
+Validation:
+Run solve in the directory to ensure the EKS control plane, node groups, Helm release, and kubectl get nodes all succeed.							
+
+
+ANSWER:
+
+terraform {
+  required_version = ">= 1.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.5"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+  }
+}
+
+#-------------------------------------------------------------------------------
+# 1. Providers
+#-------------------------------------------------------------------------------
+provider "aws" {
+  alias  = "eu"
+  region = "eu-central-1"
+}
+
+#-------------------------------------------------------------------------------
+# 2. Variables
+#-------------------------------------------------------------------------------
+variable "cluster_name" {
+  type        = string
+  default     = "fintech-prod"
+}
+
+variable "private_subnet_ids" {
+  type        = list(string)
+  description = "List of two private subnet IDs for node groups"
+}
+
+variable "vpc_id" {
+  type        = string
+  description = "VPC ID where EKS cluster resides"
+}
+
+variable "bastion_host_ip" {
+  type        = string
+  description = "Public IP of bastion for post-deploy kubectl commands"
+}
+
+variable "bastion_ssh_user" {
+  type        = string
+  default     = "ec2-user"
+}
+
+variable "bastion_private_key_path" {
+  type        = string
+  description = "Path to private key for SSH through bastion"
+}
+
+#-------------------------------------------------------------------------------
+# 3. EKS Cluster
+#-------------------------------------------------------------------------------
+resource "aws_eks_cluster" "cluster" {
+  provider = aws.eu
+  name     = var.cluster_name
+  role_arn = aws_iam_role.eks_cluster.arn
+
+  vpc_config {
+    subnet_ids = var.private_subnet_ids
+    endpoint_private_access = true
+    endpoint_public_access  = false
+  }
+}
+
+#-------------------------------------------------------------------------------
+# 4. IAM OIDC Provider for IRSA
+#-------------------------------------------------------------------------------
+data "tls_certificate" "eks_oidc" {
+  url = aws_eks_cluster.cluster.identity[0].oidc[0].issuer
+}
+
+resource "aws_iam_openid_connect_provider" "oidc" {
+  url               = aws_eks_cluster.cluster.identity[0].oidc[0].issuer
+  client_id_list    = ["sts.amazonaws.com"]
+  thumbprint_list   = [data.tls_certificate.eks_oidc.certificates[0].sha1_fingerprint]
+}
+
+#-------------------------------------------------------------------------------
+# 5. Node Groups (2 managed groups)
+#-------------------------------------------------------------------------------
+resource "aws_eks_node_group" "ng_standard" {
+  provider        = aws.eu
+  cluster_name    = aws_eks_cluster.cluster.name
+  node_group_name = "${var.cluster_name}-standard"
+  node_role_arn   = aws_iam_role.eks_node.arn
+
+  subnet_ids      = var.private_subnet_ids
+  scaling_config {
+    desired_size = 2
+    max_size     = 5
+    min_size     = 2
+  }
+
+  instance_types = ["t3.medium"]
+}
+
+resource "aws_eks_node_group" "ng_spot" {
+  provider        = aws.eu
+  cluster_name    = aws_eks_cluster.cluster.name
+  node_group_name = "${var.cluster_name}-spot"
+  node_role_arn   = aws_iam_role.eks_node.arn
+
+  subnet_ids      = var.private_subnet_ids
+  scaling_config {
+    desired_size = 2
+    max_size     = 5
+    min_size     = 2
+  }
+
+  capacity_type = "SPOT"
+  instance_types = ["t3.medium"]
+}
+
+#-------------------------------------------------------------------------------
+# 6. IAM Roles for EKS
+#-------------------------------------------------------------------------------
+resource "aws_iam_role" "eks_cluster" {
+  provider = aws.eu
+  name     = "${var.cluster_name}-cluster-role"
+  assume_role_policy = data.aws_iam_policy_document.eks_cluster_assume.json
+}
+
+data "aws_iam_policy_document" "eks_cluster_assume" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["eks.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role" "eks_node" {
+  provider = aws.eu
+  name     = "${var.cluster_name}-node-role"
+  assume_role_policy = data.aws_iam_policy_document.eks_node_assume.json
+}
+
+data "aws_iam_policy_document" "eks_node_assume" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSClusterPolicy" {
+  provider = aws.eu
+  role      = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSServicePolicy" {
+  provider = aws.eu
+  role      = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSServicePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_AmazonEKSWorkerNodePolicy" {
+  provider = aws.eu
+  role      = aws_iam_role.eks_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_AmazonEKS_CNI_Policy" {
+  provider = aws.eu
+  role      = aws_iam_role.eks_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_AmazonEC2ContainerRegistryReadOnly" {
+  provider = aws.eu
+  role      = aws_iam_role.eks_node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+#-------------------------------------------------------------------------------
+# 7. Helm Provider Configuration
+#-------------------------------------------------------------------------------
+data "aws_eks_cluster" "cluster" {
+  provider = aws.eu
+  name     = aws_eks_cluster.cluster.name
+}
+
+data "aws_eks_cluster_auth" "cluster" {
+  provider = aws.eu
+  name     = aws_eks_cluster.cluster.name
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = data.aws_eks_cluster.cluster.endpoint
+    cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
+    token                  = data.aws_eks_cluster_auth.cluster.token
+  }
+}
+
+#-------------------------------------------------------------------------------
+# 8. AWS Load Balancer Controller via Helm
+#-------------------------------------------------------------------------------
+resource "helm_repository" "eks_charts" {
+  name = "eks-charts"
+  url  = "https://aws.github.io/eks-charts"
+}
+
+resource "helm_release" "aws_lb_controller" {
+  name             = "aws-load-balancer-controller"
+  repository       = helm_repository.eks_charts.url
+  chart            = "aws-load-balancer-controller"
+  namespace        = "kube-system"
+  create_namespace = false
+  depends_on       = [aws_iam_openid_connect_provider.oidc, aws_eks_node_group.ng_standard]
+
+  set {
+    name  = "clusterName"
+    value = aws_eks_cluster.cluster.name
+  }
+  set {
+    name  = "serviceAccount.create"
+    value = "true"
+  }
+  set {
+    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = aws_iam_role.lb_sa.arn
+  }
+}
+
+# IAM for Load Balancer Controller Service Account
+resource "aws_iam_role" "lb_sa" {
+  provider = aws.eu
+  name     = "aws-load-balancer-controller-sa"
+  assume_role_policy = data.aws_iam_policy_document.lb_sa_assume.json
+}
+
+data "aws_iam_policy_document" "lb_sa_assume" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["eks.amazonaws.com", "ec2.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_eks_cluster.cluster.identity[0].oidc[0].issuer, "https://", "")}:sub"
+      values   = ["system:serviceaccount:kube-system:aws-load-balancer-controller"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "lb_sa_policy" {
+  provider   = aws.eu
+  role       = aws_iam_role.lb_sa.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSLoadBalancerControllerIAMPolicy"
+}
+
+#-------------------------------------------------------------------------------
+# 9. Configure kubectl and Verify Nodes (local-exec)
+#-------------------------------------------------------------------------------
+resource "null_resource" "kubectl_configure" {
+  depends_on = [helm_release.aws_lb_controller, aws_eks_node_group.ng_standard, aws_eks_node_group.ng_spot]
+
+  provisioner "local-exec" {
+    command = <<EOT
+      aws eks update-kubeconfig --name ${aws_eks_cluster.cluster.name} --region eu-central-1
+      kubectl get nodes
+    EOT
+  }
+}
+
+#-------------------------------------------------------------------------------
+# 10. Outputs
+#-------------------------------------------------------------------------------
+output "cluster_endpoint" {
+  value = aws_eks_cluster.cluster.endpoint
+}
+
+output "cluster_name" {
+  value = aws_eks_cluster.cluster.name
+}
+
+output "node_group_standard" {
+  value = aws_eks_node_group.ng_standard.node_group_name
+}
+
+output "node_group_spot" {
+  value = aws_eks_node_group.ng_spot.node_group_name
+}
