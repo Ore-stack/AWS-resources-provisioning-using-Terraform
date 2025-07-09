@@ -1,0 +1,279 @@
+Context:
+
+MediaStream Corp hosts a public marketing site in an S3 bucket and needs global low-latency delivery, HTTPS, cache invalidation on deploy, and an automated upload of static files. DataInsights Inc processes analytics on PostgreSQL and requires high availability, backups, a read replica, and an automated schema/seed initialization via a bastion host immediately after the database is ready.
+
+Task:
+
+Combine both requirements into a single Terraform challenge. Your main.tf must:
+
+1. S3 + CloudFront for the static website
+    - Create an S3 bucket named mediastream-public-site with static website hosting (index.html, error.html).
+    - Deploy a CloudFront distribution: • Origin = S3 website endpoint • Redirect HTTP → HTTPS • Alternate domain www.mediastream.io
+    - Request or import an ACM certificate in us-east-1 for www.mediastream.io.
+    - Output the CloudFront distribution domain name.
+    - Use a local-exec provisioner to sync the local ./site folder (containing index.html and error.html) to the bucket after creation.
+
+2. RDS Multi-AZ Primary & Read Replica + Seed Data
+    - Create a DB subnet group using existing private subnets (tagged Env=prod).
+    - Provision a Multi-AZ PostgreSQL 15 instance (db.t3.medium) with 7-day backup retention.
+    - Generate or retrieve its master password and store it in AWS Secrets Manager under datainsights/rds/pg-password.
+    - After the primary RDS becomes available, use a remote-exec provisioner to SSH into a bastion host and run a script or psql commands to initialize schema/seed data.
+    - Create a read replica of the primary instance in the same region.
+    - Output both the primary and replica endpoints.
+
+Validation:
+Run solve in the directory to verify that all resources are created, the site files are uploaded, the database is initialized, and both RDS endpoints are output.	
+
+
+ANSWER:
+
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
+  }
+  required_version = ">= 1.0"
+}
+
+#
+# 1. Providers
+#
+provider "aws" {
+  alias  = "eu" 
+  region = "eu-central-1"
+}
+
+provider "aws" {
+  alias  = "us-east-1"
+  region = "us-east-1"
+}
+
+#
+# 2. VARIABLES
+#
+variable "private_subnet_ids" {
+  description = "List of private subnet IDs tagged Env=prod for RDS"
+  type        = list(string)
+}
+
+variable "bastion_host_ip" {
+  description = "Public IP of bastion host for DB seeding"
+  type        = string
+}
+
+variable "bastion_ssh_user" {
+  description = "SSH user for bastion host"
+  type        = string
+  default     = "ec2-user"
+}
+
+variable "bastion_private_key_path" {
+  description = "Local path to SSH private key for bastion"
+  type        = string
+}
+
+#
+# 3. Random password + Secrets Manager
+#
+resource "random_password" "db_master" {
+  length  = 16
+  special = true
+}
+
+resource "aws_secretsmanager_secret" "db_pw" {
+  provider    = aws.eu
+  name        = "datainsights/rds/pg-password"
+  description = "Master password for DataInsights PostgreSQL"
+}
+
+resource "aws_secretsmanager_secret_version" "db_pw_version" {
+  provider      = aws.eu
+  secret_id     = aws_secretsmanager_secret.db_pw.id
+  secret_string = random_password.db_master.result
+}
+
+#
+# 4. DB Subnet Group
+#
+resource "aws_db_subnet_group" "main" {
+  provider   = aws.eu
+  name       = "datainsights-db-subnet-group"
+  subnet_ids = var.private_subnet_ids
+
+  tags = {
+    Name = "datainsights-db-subnet-group"
+  }
+}
+
+#
+# 5. Primary Multi-AZ PostgreSQL
+#
+resource "aws_db_instance" "primary" {
+  provider                 = aws.eu
+  identifier               = "datainsights-primary"
+  engine                   = "postgres"
+  engine_version           = "15"
+  instance_class           = "db.t3.medium"
+  allocated_storage        = 20
+  storage_type             = "gp3"
+  multi_az                 = true
+  backup_retention_period  = 7
+  username                 = "master"
+  password                 = random_password.db_master.result
+  db_subnet_group_name     = aws_db_subnet_group.main.name
+  skip_final_snapshot      = true
+
+  tags = {
+    Name = "datainsights-primary"
+  }
+}
+
+#
+# 6. Read Replica
+#
+resource "aws_db_instance" "replica" {
+  provider            = aws.eu
+  identifier          = "datainsights-replica"
+  replicate_source_db = aws_db_instance.primary.id
+  instance_class      = "db.t3.medium"
+  publicly_accessible = false
+
+  tags = {
+    Name = "datainsights-replica"
+  }
+}
+
+#
+# 7. Seed DB via bastion (remote-exec)
+#
+resource "null_resource" "seed_db" {
+  depends_on = [aws_db_instance.primary]
+
+  triggers = {
+    primary_endpoint = aws_db_instance.primary.endpoint
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.bastion_host_ip
+    user        = var.bastion_ssh_user
+    private_key = file(var.bastion_private_key_path)
+    
+    # Tunnel through bastion to RDS (psql runs on bastion)
+    bastion_host        = var.bastion_host_ip
+    bastion_user        = var.bastion_ssh_user
+    bastion_private_key = file(var.bastion_private_key_path)
+  }
+
+  provisioner "file" {
+    source      = "seed.sql"
+    destination = "/tmp/seed.sql"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      # install psql client if needed
+      "sudo yum install -y postgresql",
+      # run seed script against primary RDS endpoint
+      "PGPASSWORD='${random_password.db_master.result}' psql -h ${aws_db_instance.primary.endpoint} -U master -f /tmp/seed.sql"
+    ]
+  }
+}
+
+#
+# 8. S3 Website + CloudFront
+#
+resource "aws_s3_bucket" "site" {
+  provider = aws.eu
+  bucket   = "mediastream-public-site"
+  acl      = "public-read"
+
+  website {
+    index_document = "index.html"
+    error_document = "error.html"
+  }
+}
+
+resource "null_resource" "upload_site" {
+  depends_on = [aws_s3_bucket.site]
+
+  triggers = {
+    bucket = aws_s3_bucket.site.id
+  }
+
+  provisioner "local-exec" {
+    command = "aws s3 sync ./site s3://${aws_s3_bucket.site.bucket} --acl public-read"
+  }
+}
+
+resource "aws_acm_certificate" "cert" {
+  provider          = aws.us-east-1
+  domain_name       = "www.mediastream.io"
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_cloudfront_distribution" "cdn" {
+  provider            = aws.eu
+  enabled             = true
+  aliases             = ["www.mediastream.io"]
+  default_root_object = "index.html"
+  depends_on          = [null_resource.upload_site]
+
+  origin {
+    domain_name = aws_s3_bucket.site.website_endpoint
+    origin_id   = "s3-mediastream-site"
+
+    custom_origin_config {
+      origin_protocol_policy = "http-only"
+      http_port              = 80
+      https_port             = 443
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  default_cache_behavior {
+    target_origin_id       = "s3-mediastream-site"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET","HEAD","OPTIONS"]
+    cached_methods         = ["GET","HEAD"]
+
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn            = aws_acm_certificate.cert.arn
+    ssl_support_method             = "sni-only"
+    minimum_protocol_version       = "TLSv1.2_2021"
+  }
+}
+
+#
+# 9. OUTPUTS
+#
+output "cloudfront_domain" {
+  value = aws_cloudfront_distribution.cdn.domain_name
+}
+
+output "rds_primary_endpoint" {
+  value = aws_db_instance.primary.endpoint
+}
+
+output "rds_replica_endpoint" {
+  value = aws_db_instance.replica.endpoint
+}
