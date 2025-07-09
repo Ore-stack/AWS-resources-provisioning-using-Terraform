@@ -1,4 +1,4 @@
-••Context:••
+##Context:
 
 Innovative Coders LLC, a leading software development company, is in the process of setting up DNS management using AWS Route 53 for their various environments. The DevOps team needs to use Terraform to automate the provisioning of these DNS records to ensure consistency and efficiency. This task involves creating a hosted zone for the company's domain and setting up subdomains for production and staging environments.
 Complete the file stub "/home/ubuntu/1840475-terraform-provisioning-aws-route53-hosted-zones-and-records/main.tf" to fulfill the following requirements:
@@ -19,7 +19,7 @@ Note:
 ﻿﻿The completed solution will be evaluated in a new, clean environment. ANY CHANGES MADE MANUALLY WILL BE LOST. ONLY CHANGES TO THE "main.tf" FILE IN "/home/ubuntu/1840475-terraform-provisioning-aws-route53-hosted-zones-and-records" WILL BE CARRIED TO THE NEW ENVIRONMENT.
 ﻿﻿Run "solve" in the same directory as the "main.tf" as a shortcut to execute the code and check for runtime errors. Judge the accuracy of the results manually.
 
-<u>ANSWER</u>
+##ANSWER
 
 resource "aws_route_53_zone" "main" {
     name        = "innovativecoders.io"
