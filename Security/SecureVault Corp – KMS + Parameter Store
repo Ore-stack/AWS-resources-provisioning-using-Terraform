@@ -1,0 +1,165 @@
+Context:
+
+SecureVault Corp stores sensitive API keys and database passwords in AWS Systems Manager Parameter Store using a customer-managed KMS key for encryption and enforces least-privilege access via IAM.
+
+Task:
+
+Complete /home/ubuntu/1841230-terraform-ssm-parameters/main.tf to:
+1. Create a customer-managed KMS key with automatic key rotation enabled.
+2. Store three SecureString parameters under the path /securevault/:
+    * db_password
+    * api_key
+    * oauth_secret
+3. Grant decryption rights on these parameters only to the IAM role securevault-app-role.
+Post-Deployment Requirement:
+After Terraform provisions the key and parameters, generate a local audit log (JSON) that lists all stored parameters’ names, types, and the KMS key ARN. Use a local-exec provisioner to run the AWS CLI aws ssm describe-parameters command and redirect its output to a file named audit.json on the operator’s machine—ensuring the log is created only once provisioning completes.
+Validation:
+Run solve in the directory to verify that the KMS key, SecureString parameters, IAM permissions, and local audit.jsonfile appear as expected.
+
+
+ANSWER:
+
+terraform {
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+  }
+  required_version = ">= 1.0"
+}
+
+provider "aws" {
+  region = "eu-central-1"
+}
+
+# 1. Customer-managed KMS key with rotation
+resource "aws_kms_key" "securevault" {
+  description             = "KMS key for SecureVault Parameter Store encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Name = "securevault-parameter-key"
+  }
+}
+
+# Allow securevault-app-role to decrypt via key policy
+data "aws_iam_role" "app_role" {
+  name = "securevault-app-role"
+}
+
+resource "aws_kms_key" "securevault_policy" {
+  key_id = aws_kms_key.securevault.id
+
+  policy = data.aws_iam_policy_document.key_policy.json
+}
+
+data "aws_iam_policy_document" "key_policy" {
+  statement {
+    sid     = "Allow administration of the key"
+    effect  = "Allow"
+    actions = [
+      "kms:*"
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = [data.aws_iam_role.app_role.arn]
+    }
+    resources = ["*"]
+  }
+  
+  statement {
+    sid     = "Allow use of the key"
+    effect  = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = [data.aws_iam_role.app_role.arn]
+    }
+    resources = ["*"]
+  }
+}
+
+# 2. SecureString parameters
+locals {
+  params = {
+    "db_password"   = random_password.db.result
+    "api_key"       = random_password.api.result
+    "oauth_secret"  = random_password.oauth.result
+  }
+}
+
+resource "random_password" "db" {
+  length  = 16
+  special = true
+}
+
+resource "random_password" "api" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "oauth" {
+  length  = 24
+  special = true
+}
+
+resource "aws_ssm_parameter" "secure" {
+  for_each = local.params
+
+  name      = "/securevault/${each.key}"
+  type      = "SecureString"
+  value     = each.value
+  key_id    = aws_kms_key.securevault.arn
+  overwrite = true
+
+  tags = {
+    Name        = each.key
+    environment = "prod"
+  }
+}
+
+# 3. IAM policy granting decryption only to securevault-app-role
+resource "aws_iam_policy" "param_decrypt" {
+  name        = "securevault-ssm-decrypt"
+  description = "Allow SSM SecureString decryption for SecureVault App Role"
+
+  policy = data.aws_iam_policy_document.param_policy.json
+}
+
+data "aws_iam_policy_document" "param_policy" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+      "ssm:GetParameters",
+      "ssm:DescribeParameters"
+    ]
+    resources = [
+      for p in aws_ssm_parameter.secure : p.arn
+    ]
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "attach_param_decrypt" {
+  role       = data.aws_iam_role.app_role.name
+  policy_arn = aws_iam_policy.param_decrypt.arn
+}
+
+# 4. Post-deploy audit.log generation
+resource "null_resource" "audit_log" {
+  depends_on = [aws_ssm_parameter.secure]
+
+  provisioner "local-exec" {
+    command = <<EOT
+      aws ssm describe-parameters \
+        --parameter-filters "Key=Path,Values=/securevault/" \
+        --query 'Parameters[*].{Name:Name,Type:Type,KeyId:KeyId}' \
+        --output json > audit.json
+    EOT
+  }
+}
