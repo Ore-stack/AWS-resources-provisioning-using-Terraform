@@ -1,0 +1,224 @@
+Context:
+
+EcoDelivery, a logistics startup, wants to deploy a fault-tolerant web application that automatically scales based on demand. The team will use an Auto Scaling Group behind an Application Load Balancer.
+
+Task:
+
+Complete the file stub /home/ubuntu/1841180-terraform-autoscaling-webapp/main.tf to fulfill the following requirements:
+	•	Create a Launch Template for an EC2 instance using Amazon Linux 2.
+	•	Provision an Auto Scaling Group (ASG) with min=2, max=4 instances in eu-central-1.
+	•	Place the instances in public subnets of a VPC (you may assume a VPC is pre-existing).
+	•	Create an Application Load Balancer in front of the ASG.
+	•	Configure a health check and target group for the ASG.
+
+Note:
+	•	Ensure the ASG spans across multiple AZs.
+	•	Run solve in the directory to check correctness. 
+
+
+ANSWER:
+
+provider "aws" {
+  region = "eu-central-1"
+}
+
+# Get current VPC and public subnets (assumes public subnets are tagged accordingly)
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "public" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+
+  filter {
+    name   = "tag:Public"
+    values = ["true"]
+  }
+}
+
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+}
+
+# Security group for ALB and EC2
+resource "aws_security_group" "web_sg" {
+  name        = "ecodelivery-web-sg"
+  description = "Allow HTTP inbound"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ecodelivery-web-sg"
+  }
+}
+
+# Launch Template
+resource "aws_launch_template" "webapp" {
+  name_prefix   = "ecodelivery-webapp-"
+  image_id      = data.aws_ami.amazon_linux.id
+  instance_type = "t3.micro"
+
+  user_data = base64encode(<<-EOF
+              #!/bin/bash
+              echo "Hello from EcoDelivery WebApp" > /var/www/html/index.html
+              yum install -y httpd
+              systemctl enable httpd
+              systemctl start httpd
+              EOF
+  )
+
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.web_sg.id]
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+
+    tags = {
+      Name = "ecodelivery-webapp-instance"
+    }
+  }
+}
+
+# Target Group
+resource "aws_lb_target_group" "webapp_tg" {
+  name     = "ecodelivery-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/"
+    protocol            = "HTTP"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+  }
+}
+
+# Application Load Balancer
+resource "aws_lb" "webapp_alb" {
+  name               = "ecodelivery-alb"
+  load_balancer_type = "application"
+  subnets            = data.aws_subnets.public.ids
+  security_groups    = [aws_security_group.web_sg.id]
+
+  tags = {
+    Name = "ecodelivery-alb"
+  }
+}
+
+# Listener for ALB
+resource "aws_lb_listener" "webapp_listener" {
+  load_balancer_arn = aws_lb.webapp_alb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.webapp_tg.arn
+  }
+}
+
+# Auto Scaling Group
+resource "aws_autoscaling_group" "webapp_asg" {
+  desired_capacity     = 2
+  max_size             = 4
+  min_size             = 2
+  vpc_zone_identifier  = data.aws_subnets.public.ids
+  health_check_type    = "ELB"
+  target_group_arns    = [aws_lb_target_group.webapp_tg.arn]
+  launch_template {
+    id      = aws_launch_template.webapp.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "ecodelivery-webapp"
+    propagate_at_launch = true
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# CloudWatch Alarm: Scale OUT if CPU > 70%
+resource "aws_autoscaling_policy" "scale_out" {
+  name                   = "ecodelivery-scale-out"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 60
+  autoscaling_group_name = aws_autoscaling_group.webapp_asg.name
+}
+
+resource "aws_cloudwatch_metric_alarm" "high_cpu_alarm" {
+  alarm_name          = "ecodelivery-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 70
+  alarm_description   = "High CPU usage - scale out"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.webapp_asg.name
+  }
+  alarm_actions = [aws_autoscaling_policy.scale_out.arn]
+}
+
+# CloudWatch Alarm: Scale IN if CPU < 30%
+resource "aws_autoscaling_policy" "scale_in" {
+  name                   = "ecodelivery-scale-in"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 60
+  autoscaling_group_name = aws_autoscaling_group.webapp_asg.name
+}
+
+resource "aws_cloudwatch_metric_alarm" "low_cpu_alarm" {
+  alarm_name          = "ecodelivery-low-cpu"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 30
+  alarm_description   = "Low CPU usage - scale in"
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.webapp_asg.name
+  }
+  alarm_actions = [aws_autoscaling_policy.scale_in.arn]
+}
