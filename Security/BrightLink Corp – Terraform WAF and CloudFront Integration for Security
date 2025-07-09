@@ -1,0 +1,165 @@
+Context:
+
+BrightLink serves public-facing content through S3 and CloudFront. The security team mandates basic DDoS protection using AWS WAF.
+
+Task:
+Complete the Terraform code to:
+	•	Create a CloudFront distribution in front of an S3 static website.
+	•	Attach a WAFv2 Web ACL that:
+	•	Blocks requests from a specific country (e.g., CN).
+	•	Limits requests to 1000 per 5 minutes per IP.
+
+Note:
+	•	Prefix resources with brightlink-edge-*.
+	
+
+ANSWER:
+
+provider "aws" {
+  region = "us-east-1" # CloudFront resources must be created in us-east-1
+}
+
+# S3 Bucket for static website
+resource "aws_s3_bucket" "brightlink_content" {
+  bucket = "brightlink-edge-content"
+  acl    = "public-read"
+
+  website {
+    index_document = "index.html"
+    error_document = "error.html"
+  }
+
+  tags = {
+    Name = "brightlink-edge-content"
+  }
+}
+
+# WAFv2 Web ACL
+resource "aws_wafv2_web_acl" "brightlink_waf" {
+  name        = "brightlink-edge-waf"
+  description = "WAF for BrightLink CloudFront distribution"
+  scope       = "CLOUDFRONT"
+
+  default_action {
+    allow {}
+  }
+
+  rule {
+    name     = "brightlink-edge-geo-restriction"
+    priority = 1
+
+    action {
+      block {}
+    }
+
+    statement {
+      geo_match_statement {
+        country_codes = ["CN"]
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "brightlink-edge-geo-block"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "brightlink-edge-rate-limit"
+    priority = 2
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 1000
+        aggregate_key_type = "IP"
+        evaluation_window_sec = 300 # 5 minutes
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "brightlink-edge-rate-limit"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "brightlink-edge-waf"
+    sampled_requests_enabled   = true
+  }
+
+  tags = {
+    Name = "brightlink-edge-waf"
+  }
+}
+
+# CloudFront Distribution
+resource "aws_cloudfront_distribution" "brightlink_distribution" {
+  origin {
+    domain_name = aws_s3_bucket.brightlink_content.website_endpoint
+    origin_id   = "brightlink-edge-s3-origin"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "http-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  enabled             = true
+  is_ipv6_enabled     = true
+  comment             = "BrightLink content delivery"
+  default_root_object = "index.html"
+
+  aliases = [] # Add your custom domains here if needed
+
+  default_cache_behavior {
+    allowed_methods  = ["GET", "HEAD"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = "brightlink-edge-s3-origin"
+
+    forwarded_values {
+      query_string = false
+
+      cookies {
+        forward = "none"
+      }
+    }
+
+    viewer_protocol_policy = "redirect-to-https"
+    min_ttl                = 0
+    default_ttl            = 3600
+    max_ttl                = 86400
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    cloudfront_default_certificate = true
+  }
+
+  web_acl_id = aws_wafv2_web_acl.brightlink_waf.arn
+
+  tags = {
+    Name = "brightlink-edge-distribution"
+  }
+}
+
+output "cloudfront_domain" {
+  value = aws_cloudfront_distribution.brightlink_distribution.domain_name
+}
+
+output "s3_website_url" {
+  value = aws_s3_bucket.brightlink_content.website_endpoint
+}
