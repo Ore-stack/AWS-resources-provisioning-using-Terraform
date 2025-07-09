@@ -1,0 +1,95 @@
+Context:
+
+SnapServe Studios, a media editing platform, is moving shared storage for render workloads to Amazon EFS. Their render nodes run in different subnets and need to mount the same filesystem.
+
+Task:
+
+Complete the Terraform file to:
+	•	Create an EFS file system named snapserve-shared-media.
+	•	Create mount targets in 2 subnets (subnet IDs provided).
+	•	Add security group rules to allow NFS access (port 2049).
+
+Note:
+	•	Region: eu-central-1.
+	•	Assume subnet and VPC IDs are known or passed as variables.
+
+
+ANSWER	
+
+#-------------------------------------------------
+# main.tf — Terraform for Amazon EFS shared storage
+#-------------------------------------------------
+
+provider "aws" {
+  region = "eu-central-1"
+}
+
+#-------------------------------------------------
+# Input variables
+#-------------------------------------------------
+variable "vpc_id" {
+  description = "ID of the VPC where EFS will be deployed"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "List of subnet IDs for EFS mount targets"
+  type        = list(string)
+}
+
+#-------------------------------------------------
+# Lookup the VPC CIDR for SG ingress rule
+#-------------------------------------------------
+data "aws_vpc" "target" {
+  id = var.vpc_id
+}
+
+#-------------------------------------------------
+# Security Group for EFS — allow NFS (TCP 2049)
+#-------------------------------------------------
+resource "aws_security_group" "efs_sg" {
+  name        = "snapserve-efs-sg"
+  description = "Allow NFS access to EFS"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description      = "NFS from inside VPC"
+    from_port        = 2049
+    to_port          = 2049
+    protocol         = "tcp"
+    cidr_blocks      = [data.aws_vpc.target.cidr_block]
+  }
+
+  egress {
+    description = "Allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "snapserve-efs-sg"
+  }
+}
+
+#-------------------------------------------------
+# EFS File System
+#-------------------------------------------------
+resource "aws_efs_file_system" "shared_media" {
+  creation_token = "snapserve-shared-media"
+
+  tags = {
+    Name = "snapserve-shared-media"
+  }
+}
+
+#-------------------------------------------------
+# Mount Targets in each subnet
+#-------------------------------------------------
+resource "aws_efs_mount_target" "shared_media" {
+  for_each        = toset(var.subnet_ids)
+  file_system_id  = aws_efs_file_system.shared_media.id
+  subnet_id       = each.value
+  security_groups = [aws_security_group.efs_sg.id]
+}
