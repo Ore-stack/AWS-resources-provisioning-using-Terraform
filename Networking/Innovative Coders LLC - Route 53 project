@@ -1,0 +1,49 @@
+••Context:••
+
+Innovative Coders LLC, a leading software development company, is in the process of setting up DNS management using AWS Route 53 for their various environments. The DevOps team needs to use Terraform to automate the provisioning of these DNS records to ensure consistency and efficiency. This task involves creating a hosted zone for the company's domain and setting up subdomains for production and staging environments.
+Complete the file stub "/home/ubuntu/1840475-terraform-provisioning-aws-route53-hosted-zones-and-records/main.tf" to fulfill the following requirements:
+﻿﻿Create a Route 53 hosted zone for the domain "innovativecoders.io".
+﻿﻿Create the following subdomains within the hosted zone:
+﻿﻿"innovativecoders.io":
+﻿﻿Туре: А
+﻿﻿TTL: 300
+﻿﻿Records: 192.0.2.1
+﻿﻿"staging.innovativecoders.io":
+﻿﻿Туре: А
+﻿﻿ITL: 300
+﻿﻿Records: 192.0.2.3
+﻿﻿Create a CNAME record for "www.innovativecoders.io" pointing to "innovativecoders.io"
+
+Note:
+﻿﻿Ensure the AWS region "eu-central-1" is used.
+﻿﻿The completed solution will be evaluated in a new, clean environment. ANY CHANGES MADE MANUALLY WILL BE LOST. ONLY CHANGES TO THE "main.tf" FILE IN "/home/ubuntu/1840475-terraform-provisioning-aws-route53-hosted-zones-and-records" WILL BE CARRIED TO THE NEW ENVIRONMENT.
+﻿﻿Run "solve" in the same directory as the "main.tf" as a shortcut to execute the code and check for runtime errors. Judge the accuracy of the results manually.
+
+<u>ANSWER</u>
+
+resource "aws_route_53_zone" "main" {
+    name        = "innovativecoders.io"
+}
+
+resource "aws_route_53_zone" "root_a_record"  {
+    zone_id     = aws_route_53_zone.main.zone_id
+    name        = "innovativecoders.io"
+    ttl         = 300
+    type        = "A"
+    records     = ["192..0.2.1"]
+}
+
+resource "aws_route_53_zone" "staging_a_record" {
+    zone_id     = aws_route_53_zone.main.zone_id
+    name        = "staging.innovativecoders.io"
+    ttl         = 300
+    type        = "A"
+    records     = ["192.0.2.3"]
+}
+
+resource "aws_route_53_record" "www_cname_record" {
+    zone_id     = aws_route_53_zone.main.zone_id
+    name        = "www.innovativecoders.io"
+    ttl         = 300
+    type        = "CNAME"
+    records     = "innovativecoders.io"
