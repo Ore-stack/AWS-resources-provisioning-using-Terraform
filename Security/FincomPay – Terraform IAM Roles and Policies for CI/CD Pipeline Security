@@ -1,0 +1,113 @@
+Context:
+
+FincomPay’s DevOps team is automating IAM policy provisioning to secure their CI/CD pipeline that deploys apps to ECS.
+
+Task:
+Complete the Terraform setup to:
+	•	Create an IAM role fincompay-deploy-role.
+	•	Attach a policy that:
+	•	Allows ECS Deployments.
+	•	Allows CloudWatch log writes.
+	•	Allows S3 reads from fincompay-deployments.
+
+Note:
+	•	Trust relationship should allow use from codebuild.amazonaws.com.
+	•	Tag resources with environment = "cicd".
+	
+	
+ANSWER:
+
+provider "aws" {
+  region = "us-east-1b "
+}
+
+#----------------------------------------------------------------
+# 1. IAM Role for CodeBuild to assume
+#----------------------------------------------------------------
+data "aws_iam_policy_document" "fincompay_deploy_assume" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["codebuild.amazonaws.com"]
+    }
+
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role" "fincompay_deploy_role" {
+  name               = "fincompay-deploy-role"
+  assume_role_policy = data.aws_iam_policy_document.fincompay_deploy_assume.json
+
+  tags = {
+    environment = "cicd"
+  }
+}
+
+#----------------------------------------------------------------
+# 2. Inline policy document granting ECS, CloudWatch Logs, S3 read
+#----------------------------------------------------------------
+data "aws_iam_policy_document" "fincompay_deploy_policy" {
+  statement {
+    sid     = "AllowECSOperations"
+    effect  = "Allow"
+    actions = [
+      "ecs:CreateService",
+      "ecs:UpdateService",
+      "ecs:DeleteService",
+      "ecs:DescribeServices",
+      "ecs:ListClusters",
+      "ecs:DescribeTaskDefinition",
+      "ecs:RegisterTaskDefinition",
+      "ecs:RunTask",
+      "ecs:StopTask",
+      "ecs:ListTasks"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid     = "AllowCloudWatchLogWrites"
+    effect  = "Allow"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogStreams"
+    ]
+    resources = ["arn:aws:logs:*:*:log-group:/aws/codebuild/*"]
+  }
+
+  statement {
+    sid     = "AllowS3ReadDeployments"
+    effect  = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:ListBucket"
+    ]
+    resources = [
+      "arn:aws:s3:::fincompay-deployments",
+      "arn:aws:s3:::fincompay-deployments/*"
+    ]
+  }
+}
+
+resource "aws_iam_policy" "fincompay_deploy" {
+  name        = "fincompay-deploy-policy"
+  description = "Policy for ECS deploy, CW Logs write, S3 read in CICD"
+  policy      = data.aws_iam_policy_document.fincompay_deploy_policy.json
+
+  tags = {
+    environment = "cicd"
+  }
+}
+
+#----------------------------------------------------------------
+# 3. Attach the policy to the role
+#----------------------------------------------------------------
+resource "aws_iam_role_policy_attachment" "fincompay_deploy_attach" {
+  role       = aws_iam_role.fincompay_deploy_role.name
+  policy_arn = aws_iam_policy.fincompay_deploy.arn
+}
