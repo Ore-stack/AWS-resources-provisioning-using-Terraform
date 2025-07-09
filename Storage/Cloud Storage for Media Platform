@@ -1,0 +1,110 @@
+Context:
+
+PixelStream Inc., a digital media company, is implementing a secure and scalable storage solution for customer uploads. The DevOps team has decided to use AWS S3 with encryption and versioning enabled to comply with internal data retention policies.
+
+Task:
+
+Complete the file stub /home/ubuntu/1841170-terraform-s3-secure-storage/main.tf to fulfill the following requirements:
+	•	Create an S3 bucket named pixelstream-media-uploads.
+	•	Enable versioning to track file changes.
+	•	Enable default encryption using AWS-managed keys (SSE-S3).
+	•	Apply a bucket policy that allows only users in the AWS account to access the objects.
+	•	Ensure the bucket is created in the eu-central-1 region.
+
+Note:
+	•	Do not use any hard-coded account IDs; use data sources where necessary.
+	•	Run solve in the same directory to apply and verify the configuration.
+	
+ANSWER:
+
+resource "aws_s3_bucket" "media_uploads" {
+    bucket        = "pixelstream-media-uploads"
+}
+
+resource "aws_s3_bucket_acl" "main" {
+    bucket        = "aws_s3_bucket.main.id"
+    acl           = "private"
+}
+
+resource "aws_s3_bucket_versioning" "versioning_example" {
+    bucket        = aws_s3_bucket_versioning.media_uploads.id
+    versioning_configuration {
+        status    = "Enabled"
+    }
+}
+
+resource "aws_kms_key" "mykey" {
+    description             = "This key is used to encrypt bucket objects"
+    deletion_window_in_days = 10
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "encryption" {
+    bucket = aws_s3_bucket_versioning.media_uploads.id
+# FOR AWS-managed keys (SSE-S3)
+    rule {
+        apply_server_side_encryption_by_default {
+            sse_algorithm = "AES256"
+        }
+    }
+
+# For SSE-KMS with customer-managed keys
+##    rule {
+##       apply_server_side_encryption_by_default {
+##        kms_master_key_id = aws_kms_key.mykey.arn
+ ##       sse_algorithm     = "aws:kms"
+ ##       }
+ ##   }
+}
+
+
+# Allow users and roles in your own AWS account to access the bucket, and deny all others
+resource "aws_s3_bucket_policy" "restrict_access" {
+  bucket = aws_s3_bucket.media_uploads.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid       = "AllowAccountAccessOnly",
+        Effect    = "Allow",
+        Principal = "*",
+        Action    = "s3:*",
+        Resource = [
+          "arn:aws:s3:::${aws_s3_bucket.media_uploads.bucket}",
+          "arn:aws:s3:::${aws_s3_bucket.media_uploads.bucket}/*"
+        ],
+        Condition = {
+          StringEquals = {
+            "aws:PrincipalAccount" = data.aws_caller_identity.current.account_id
+          }
+        }
+      }
+    ]
+  })
+}
+
+# Grants access to a specific AWS account (e.g., account 123456789012) to perform limited S3 actions like GetObject and ListBucket.
+#resource "aws_s3_bucket_policy" "restrict_access" {
+    bucket = aws_s3_bucket.media_uploads.id
+
+    policy = data.aws_iam_policy_document.allow_access_from_another_account.json
+}
+
+data "aws_iam_policy_document" "allow_access_from_another_account" {
+    statement {
+        principals {
+            type        = "AWS"
+            identifiers = ["123456789012"]
+        }
+
+        actions = [
+        "s3:GetObject",
+        "s3:ListBucket",
+        ]
+
+        resources = [
+        aws_s3_bucket.example.arn,
+        "${aws_s3_bucket.example.arn}/*",
+        ]
+    }
+}
