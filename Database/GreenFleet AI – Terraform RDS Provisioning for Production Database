@@ -1,0 +1,127 @@
+Context:
+
+GreenFleet AI’s recommendation engine relies on a PostgreSQL database. The team needs an RDS instance with high availability and backups enabled.
+
+Task:
+Complete the Terraform setup to:
+	•	Create an RDS PostgreSQL instance:
+	•	Engine version: 15
+	•	Instance class: db.t3.medium
+	•	Multi-AZ enabled
+	•	Backup retention: 7 days
+	•	Use a random password generated via Terraform.
+	•	Store the password in AWS Secrets Manager under the key greenfleet/rds/pg-password.
+	
+
+ANSWER:
+
+i. Provider and Required Providers
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "eu-central-1"
+}
+
+ii. Generate a Random Password
+
+resource "random_password" "pg_master" {
+  length           = 16
+  override_characters = "!@#$%&*()-_+=<>?"
+  special          = true
+}
+
+iii. Store Password in AWS Secrets Manager
+
+resource "aws_secretsmanager_secret" "pg_secret" {
+  name        = "greenfleet/rds/pg-password"
+  description = "Primary PostgreSQL master password for GreenFleet AI"
+}
+
+resource "aws_secretsmanager_secret_version" "pg_secret_version" {
+  secret_id     = aws_secretsmanager_secret.pg_secret.id
+  secret_string = random_password.pg_master.result
+}
+
+iv. Database Subnet Group
+
+Assumes you provide a list of private subnet IDs in var.db_subnet_ids.
+
+variable "db_subnet_ids" {
+  type        = list(string)
+  description = "List of private subnet IDs for RDS"
+}
+
+resource "aws_db_subnet_group" "postgres" {
+  name       = "greenfleet-postgres-subnet-group"
+  subnet_ids = var.db_subnet_ids
+  tags = {
+    Name = "greenfleet-postgres-subnet-group"
+  }
+}
+
+v. Security Group for RDS
+
+Assumes you provide the VPC ID in var.vpc_id.
+
+variable "vpc_id" {
+  type        = string
+  description = "VPC ID where RDS will be deployed"
+}
+
+resource "aws_security_group" "postgres" {
+  name        = "greenfleet-postgres-sg"
+  description = "Allow PostgreSQL access"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]  # adjust to your CIDR or security requirements
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+}
+
+  tags = {
+    Name = "greenfleet-postgres-sg"
+  }
+}
+
+vi. RDS PostgreSQL Instance
+
+resource "aws_db_instance" "postgres" {
+  identifier               = "greenfleet-postgres"
+  engine                   = "postgres"
+  engine_version           = "15"
+  instance_class           = "db.t3.medium"
+  allocated_storage        = 20
+  storage_type             = "gp3"
+  multi_az                 = true
+  backup_retention_period  = 7
+  username                 = "master"
+  password                 = random_password.pg_master.result
+  db_subnet_group_name     = aws_db_subnet_group.postgres.name
+  vpc_security_group_ids   = [aws_security_group.postgres.id]
+  skip_final_snapshot      = false
+
+  tags = {
+    Name = "greenfleet-postgres"
+  }
+}
