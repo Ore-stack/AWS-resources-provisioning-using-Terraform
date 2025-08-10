@@ -1,8 +1,8 @@
-# Context:
+Context:
 
 ArcticView Analytics operates data pipelines that run 24/7 to process telemetry from smart city sensors. They need a centralized monitoring solution with alerts to detect anomalies and prevent delays in pipeline processing.
 
-## Task:
+Task:
 Complete the Terraform configuration to:
 	•	Deploy CloudWatch metric alarms on an EC2 instance that processes the pipeline.
 	•	Set alarms for:
@@ -11,7 +11,7 @@ Complete the Terraform configuration to:
 	•	Send alarm notifications via SNS.
 	•	SNS topic should be named arcticview-alerts with a dummy email subscription.
 
-### Note:
+Note:
 	•	The EC2 instance is assumed to be running already.
 	•	Use us-west-1a and name resources with the prefix arcticview-data-*.
 
