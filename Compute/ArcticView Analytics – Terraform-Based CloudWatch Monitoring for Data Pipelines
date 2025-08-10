@@ -14,3 +14,60 @@ Complete the Terraform configuration to:
 ### Note:
 	•	The EC2 instance is assumed to be running already.
 	•	Use us-west-1a and name resources with the prefix arcticview-data-*.
+
+ANSWER:
+
+provider "aws" {
+  region = "us-west-1a"
+}
+
+#----------------------------------------------------------
+# Input variable for the existing EC2 instance to monitor
+#----------------------------------------------------------
+variable "instance_id" {
+  description = "The ID of the EC2 instance processing the pipeline"
+  type        = string
+}
+
+#----------------------------------------------------------
+# Lookup the existing EC2 instance by ID
+#----------------------------------------------------------
+data "aws_instance" "pipeline" {
+  instance_id = var.instance_id
+}
+
+#----------------------------------------------------------
+# SNS Topic & Dummy Email Subscription
+#----------------------------------------------------------
+resource "aws_sns_topic" "alerts" {
+  name = "arcticview-alerts"
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  # replace with a real address when testing production
+  endpoint  = "alerts@example.com"
+}
+
+#----------------------------------------------------------
+# CloudWatch Alarm: CPU Utilization > 80% for 5 minutes
+#----------------------------------------------------------
+resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+  alarm_name          = "arcticview-data-cpu-utilization-high"
+  alarm_description   = "Triggers when CPUUtilization > 80% for 5 consecutive minutes"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  period              = 300
+  threshold           = 80
+  statistic           = "Average"
+  namespace           = "AWS/EC2"
+
+  dimensions = {
+    InstanceId = data.aws_instance.pipeline.id
+  }
+
+  alarm_actions = [
+    aws_sns_topic.alerts.arn
+  ]
+}
